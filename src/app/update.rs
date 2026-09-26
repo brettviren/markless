@@ -90,6 +90,8 @@ pub enum Message {
     SelectVisibleLink(u8),
     /// Close visible-link picker
     CancelVisibleLinkPicker,
+    /// Go back to the file and scroll position visited before the last followed link
+    GoBack,
     /// Update hovered link URL (or clear when none)
     HoverLink(Option<String>),
     /// Start a line selection (mouse down)
@@ -382,7 +384,8 @@ pub fn update(mut model: Model, msg: Message) -> Model {
         }
         Message::OpenVisibleLinks
         | Message::FollowLinkAtLine(_, _)
-        | Message::SelectVisibleLink(_) => {
+        | Message::SelectVisibleLink(_)
+        | Message::GoBack => {
             model.clear_selection();
             // side effect in event loop
         }

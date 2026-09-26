@@ -97,6 +97,8 @@ pub struct Model {
     pub hovered_link_url: Option<String>,
     /// Pending visible-link picker items for quick follow (`o`)
     pub link_picker_items: Vec<crate::document::LinkRef>,
+    /// Stack of (file path, scroll offset) visited before following a link to another file
+    pub(super) nav_history: Vec<(PathBuf, usize)>,
     toast: Option<Toast>,
     /// Current search query
     pub search_query: Option<String>,
@@ -209,6 +211,7 @@ impl Model {
             help_scroll_offset: 0,
             hovered_link_url: None,
             link_picker_items: Vec::new(),
+            nav_history: Vec::new(),
             toast: None,
             search_query: None,
             search_matches: Vec::new(),
@@ -1072,6 +1075,7 @@ impl Default for Model {
             help_scroll_offset: 0,
             hovered_link_url: None,
             link_picker_items: Vec::new(),
+            nav_history: Vec::new(),
             toast: None,
             search_query: None,
             search_matches: Vec::new(),

@@ -98,6 +98,9 @@ pub fn render_help_overlay(model: &Model, frame: &mut Frame, area: Rect) {
     all_lines.push(Line::raw("  b/PageUp            Page up"));
     all_lines.push(Line::raw("  Ctrl-d / Ctrl-u     Half page"));
     all_lines.push(Line::raw("  g / G               Top / bottom"));
+    all_lines.push(Line::raw(
+        "  Backspace           Go back (after following a link)",
+    ));
     all_lines.push(Line::raw(""));
 
     // Search

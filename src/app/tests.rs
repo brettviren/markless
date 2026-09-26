@@ -894,6 +894,80 @@ fn test_follow_local_markdown_link_loads_target_file() {
 }
 
 #[test]
+fn test_go_back_returns_to_previous_file_and_scroll_offset() {
+    let dir = tempdir().unwrap();
+    let current_path = dir.path().join("current.md");
+    let target_path = dir.path().join("next.md");
+    let mut current_md = String::from("[Next](next.md)\n\n");
+    for i in 1..=20 {
+        current_md.push_str(&format!("Line {i}\n\n"));
+    }
+    std::fs::write(&current_path, &current_md).unwrap();
+    std::fs::write(&target_path, "# Next\n\nLoaded").unwrap();
+
+    let doc = Document::parse_with_layout(&current_md, 80).unwrap();
+    let link_line = doc.links()[0].line;
+    let mut model = Model::new(current_path.clone(), doc, (80, 8));
+    model.viewport.scroll_down(3);
+    let mut watcher = None;
+
+    model = update(model, Message::FollowLinkAtLine(link_line, None));
+    App::handle_message_side_effects(
+        &mut model,
+        &mut watcher,
+        &Message::FollowLinkAtLine(link_line, None),
+    );
+    assert_eq!(model.file_path, target_path);
+
+    model = update(model, Message::GoBack);
+    App::handle_message_side_effects(&mut model, &mut watcher, &Message::GoBack);
+
+    assert_eq!(model.file_path, current_path);
+    assert_eq!(model.viewport.offset(), 3);
+}
+
+#[test]
+fn test_go_back_with_no_history_does_not_change_file() {
+    let mut model = create_test_model();
+    let original_path = model.file_path.clone();
+    let mut watcher = None;
+
+    model = update(model, Message::GoBack);
+    App::handle_message_side_effects(&mut model, &mut watcher, &Message::GoBack);
+
+    assert_eq!(model.file_path, original_path);
+}
+
+#[test]
+fn test_go_back_after_anchor_jump_has_no_cross_file_history() {
+    let md = "[Go](#target)\n\n## Target";
+    let doc = Document::parse_with_layout(md, 80).unwrap();
+    let mut model = Model::new(PathBuf::from("test.md"), doc, (80, 4));
+    let mut watcher = None;
+
+    model = update(model, Message::OpenVisibleLinks);
+    App::handle_message_side_effects(&mut model, &mut watcher, &Message::OpenVisibleLinks);
+    let offset_after_jump = model.viewport.offset();
+    assert!(offset_after_jump > 0);
+
+    model = update(model, Message::GoBack);
+    App::handle_message_side_effects(&mut model, &mut watcher, &Message::GoBack);
+
+    // In-document anchor jumps don't record cross-file history, so GoBack is a no-op.
+    assert_eq!(model.viewport.offset(), offset_after_jump);
+}
+
+#[test]
+fn test_backspace_key_triggers_go_back_message() {
+    let model = create_test_model();
+    let msg = App::handle_key(
+        event::KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        &model,
+    );
+    assert_eq!(msg, Some(Message::GoBack));
+}
+
+#[test]
 fn test_follow_local_markdown_link_with_code_styled_label_loads_target_file() {
     let dir = tempdir().unwrap();
     let current_path = dir.path().join("current.md");

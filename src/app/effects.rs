@@ -83,6 +83,9 @@ impl App {
             Message::SelectVisibleLink(index) => {
                 Self::follow_link_picker_index(model, *index);
             }
+            Message::GoBack => {
+                Self::go_back(model);
+            }
             Message::EndSelection(_) => {
                 Self::copy_selection(model);
                 model.clear_selection();
@@ -229,8 +232,10 @@ impl App {
         }
 
         if let Some((path, anchor)) = resolve_local_file_link(model, url) {
+            let previous = (model.file_path.clone(), model.viewport.offset());
             match model.load_file(&path) {
                 Ok(()) => {
+                    model.nav_history.push(previous);
                     Self::sync_browse_state_to_loaded_file(model);
                     if let Some(anchor) = anchor {
                         if let Some(target) = model.document.resolve_internal_anchor(&anchor) {
@@ -257,6 +262,21 @@ impl App {
         match open_external_link(url) {
             Ok(()) => model.show_toast(ToastLevel::Info, format!("Opened {url}")),
             Err(err) => model.show_toast(ToastLevel::Error, format!("Open failed: {err}")),
+        }
+    }
+
+    fn go_back(model: &mut Model) {
+        let Some((path, offset)) = model.nav_history.pop() else {
+            model.show_toast(ToastLevel::Info, "No previous file");
+            return;
+        };
+        match model.load_file(&path) {
+            Ok(()) => {
+                Self::sync_browse_state_to_loaded_file(model);
+                model.viewport.go_to_line(offset);
+                model.show_toast(ToastLevel::Info, format!("Back to {}", path.display()));
+            }
+            Err(err) => model.show_toast(ToastLevel::Error, format!("Back failed: {err}")),
         }
     }
 

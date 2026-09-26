@@ -385,6 +385,9 @@ impl App {
             // Search
             KeyCode::Esc => Some(Message::ClearSearch),
 
+            // Go back to the file/position visited before the last followed link
+            KeyCode::Backspace => Some(Message::GoBack),
+
             // Quit
             KeyCode::Char('q') => Some(Message::Quit),
 
