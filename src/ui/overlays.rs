@@ -142,6 +142,7 @@ pub fn render_help_overlay(model: &Model, frame: &mut Frame, area: Rect) {
     // Other
     all_lines.push(Line::styled("Other", section_style));
     all_lines.push(Line::raw("  w                   Toggle watch"));
+    all_lines.push(Line::raw("  L                   Toggle table cell wrap"));
     all_lines.push(Line::raw("  r / R               Reload file"));
     all_lines.push(Line::raw("  o                   Open visible links (1-9)"));
     all_lines.push(Line::raw("  q / Ctrl-c / Ctrl-q Quit"));

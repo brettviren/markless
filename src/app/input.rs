@@ -325,6 +325,7 @@ impl App {
             KeyCode::Char('G') | KeyCode::End => return Some(Message::GoToBottom),
             KeyCode::Char('/') => return Some(Message::StartSearch),
             KeyCode::Char('w') => return Some(Message::ToggleWatch),
+            KeyCode::Char('L') => return Some(Message::ToggleTableWrap),
             KeyCode::Char('R' | 'r') => return Some(Message::ForceReload),
             KeyCode::Char('o') => return Some(Message::OpenVisibleLinks),
             _ => {}

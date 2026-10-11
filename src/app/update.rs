@@ -56,6 +56,8 @@ pub enum Message {
     // File watching
     /// Toggle file watching
     ToggleWatch,
+    /// Toggle wrapping table cell text across multiple lines instead of truncating
+    ToggleTableWrap,
     /// Toggle help overlay
     ToggleHelp,
     /// Hide help overlay
@@ -307,6 +309,10 @@ pub fn update(mut model: Model, msg: Message) -> Model {
         // File watching
         Message::ToggleWatch => {
             model.watch_enabled = !model.watch_enabled;
+        }
+        Message::ToggleTableWrap => {
+            model.table_wrap = !model.table_wrap;
+            model.reflow_layout();
         }
         Message::ToggleHelp => {
             model.help_visible = !model.help_visible;

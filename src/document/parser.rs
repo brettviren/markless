@@ -25,6 +25,9 @@ pub struct DiagramRenderOpts<'a> {
     pub failed_math_srcs: &'a HashSet<String>,
     /// Disable inline (Unicode) math, rendering as images instead.
     pub no_inline_math: bool,
+    /// Wrap table cell text across multiple lines instead of truncating
+    /// when the table is wider than the available terminal width.
+    pub wrap_tables: bool,
 }
 
 impl Default for DiagramRenderOpts<'_> {
@@ -35,6 +38,7 @@ impl Default for DiagramRenderOpts<'_> {
             math_as_images: false,
             failed_math_srcs: &EMPTY_HASH_SET,
             no_inline_math: false,
+            wrap_tables: false,
         }
     }
 }
@@ -275,6 +279,7 @@ fn parse_with_all_options_internal<S: BuildHasher>(
         math_as_images: opts.math_as_images,
         failed_math_srcs: opts.failed_math_srcs,
         no_inline_math: opts.no_inline_math,
+        wrap_tables: opts.wrap_tables,
     };
     process_node(root, &mut ctx, 0, None);
 
@@ -338,6 +343,7 @@ struct ParseContext<'h, S: BuildHasher = std::collections::hash_map::RandomState
     math_as_images: bool,
     failed_math_srcs: &'h HashSet<String>,
     no_inline_math: bool,
+    wrap_tables: bool,
 }
 
 fn process_node<'a, S: BuildHasher>(
@@ -561,7 +567,8 @@ fn process_node<'a, S: BuildHasher>(
 
             // Render CSV code blocks as tables instead of code blocks
             if language == Some("csv") {
-                let csv_lines = render_csv_as_table(&literal);
+                let csv_lines =
+                    render_csv_as_table(&literal, ctx.code_block_max_width, ctx.wrap_tables);
                 if !csv_lines.is_empty() {
                     ctx.lines.extend(csv_lines);
                     ctx.lines
@@ -785,7 +792,13 @@ fn process_node<'a, S: BuildHasher>(
         NodeValue::Table(_) => {
             let base_line = ctx.lines.len();
             let link_start = ctx.link_refs.len();
-            let table_lines = render_table(node, &mut ctx.link_refs, &mut ctx.images);
+            let table_lines = render_table(
+                node,
+                &mut ctx.link_refs,
+                &mut ctx.images,
+                ctx.code_block_max_width,
+                ctx.wrap_tables,
+            );
             ctx.lines.extend(table_lines);
             // Fix up link lines relative to where the table was placed
             for link in &mut ctx.link_refs[link_start..] {
@@ -1342,6 +1355,8 @@ fn render_table<'a>(
     table_node: &'a AstNode<'a>,
     link_refs: &mut Vec<LinkRef>,
     images: &mut Vec<ImageRef>,
+    max_width: usize,
+    wrap: bool,
 ) -> Vec<RenderedLine> {
     let CollectedTableRows {
         alignments,
@@ -1373,13 +1388,20 @@ fn render_table<'a>(
             col_widths[idx] = col_widths[idx].max(display_width(&cell.text));
         }
     }
+    if wrap {
+        col_widths = fit_table_col_widths(&col_widths, max_width);
+    }
 
     let mid = render_table_inner_divider(&col_widths);
 
     let mut lines = Vec::new();
     for (idx, row) in rows.iter().enumerate() {
         let output_line = lines.len();
-        lines.push(render_table_row(row, &col_widths, &alignments));
+        if wrap {
+            lines.extend(render_table_row_lines(row, &col_widths, &alignments));
+        } else {
+            lines.push(render_table_row(row, &col_widths, &alignments));
+        }
         // Assign the correct output line to links collected from this row
         for link_idx in &row_links[idx] {
             link_refs[*link_idx].line = output_line;
@@ -1389,6 +1411,143 @@ fn render_table<'a>(
         }
     }
     lines
+}
+
+/// Compute the column widths a table should render at, shrinking columns to
+/// fit `available_total` (the terminal's content width) when the table's
+/// natural width exceeds it. Cells that no longer fit their column are
+/// meant to be word-wrapped by the caller rather than truncated.
+fn fit_table_col_widths(natural: &[usize], available_total: usize) -> Vec<usize> {
+    let num_cols = natural.len();
+    if num_cols == 0 {
+        return Vec::new();
+    }
+    // Border overhead for the widest bordered element: the header divider,
+    // which renders each column as `width + 2` dashes joined by `┼` and so
+    // is 1 char wider than a data row (which has no trailing " │" on its
+    // last column). Sizing content to fit the divider keeps every physical
+    // line — including the divider — within `available_total`.
+    let overhead = 3 * num_cols - 1;
+    let available_for_content = available_total.saturating_sub(overhead).max(num_cols);
+    distribute_column_widths(natural, available_for_content)
+}
+
+/// Water-filling column width allocation: columns that fit within their
+/// fair share keep their natural width; the remaining budget is split
+/// evenly among the columns that need to shrink.
+fn distribute_column_widths(natural: &[usize], available: usize) -> Vec<usize> {
+    let num_cols = natural.len();
+    if num_cols == 0 {
+        return Vec::new();
+    }
+    let total: usize = natural.iter().sum();
+    if total <= available {
+        return natural.to_vec();
+    }
+
+    let mut widths = natural.to_vec();
+    let mut settled = vec![false; num_cols];
+    let mut budget = available;
+    let mut active = num_cols;
+
+    loop {
+        let share = (budget / active).max(1);
+        let mut settled_this_round = false;
+        for i in 0..num_cols {
+            if settled[i] {
+                continue;
+            }
+            if widths[i] <= share {
+                budget = budget.saturating_sub(widths[i]);
+                active -= 1;
+                settled[i] = true;
+                settled_this_round = true;
+            }
+        }
+        if active == 0 {
+            break;
+        }
+        if !settled_this_round {
+            let base = budget / active;
+            let mut extra = budget % active;
+            for (i, settled) in settled.iter().enumerate() {
+                if *settled {
+                    continue;
+                }
+                let mut w = base.max(1);
+                if extra > 0 {
+                    w += 1;
+                    extra -= 1;
+                }
+                widths[i] = w;
+            }
+            break;
+        }
+    }
+
+    widths
+}
+
+/// Render a single logical table row as one or more physical `RenderedLine`s,
+/// word-wrapping each cell's content within its column width instead of
+/// truncating it. Rows are padded so every column has the same number of
+/// physical lines.
+fn render_table_row_lines(
+    cells: &[TableCellRender],
+    widths: &[usize],
+    alignments: &[TableAlignment],
+) -> Vec<RenderedLine> {
+    let num_cols = widths.len();
+    let wrapped_cols: Vec<Vec<Vec<InlineSpan>>> = (0..num_cols)
+        .map(|idx| {
+            let cell = cells.get(idx).cloned().unwrap_or(TableCellRender {
+                text: String::new(),
+                spans: Vec::new(),
+            });
+            wrap_spans(&cell.spans, widths[idx].max(1), "", "")
+        })
+        .collect();
+
+    let row_height = wrapped_cols.iter().map(Vec::len).max().unwrap_or(1).max(1);
+
+    let mut out = Vec::with_capacity(row_height);
+    for line_idx in 0..row_height {
+        let mut spans = Vec::new();
+        for (idx, &width) in widths.iter().enumerate() {
+            let mut content_spans = wrapped_cols
+                .get(idx)
+                .and_then(|lines| lines.get(line_idx))
+                .cloned()
+                .unwrap_or_default();
+            let content_width = display_width(&spans_to_string(&content_spans));
+            let padding = width.saturating_sub(content_width);
+
+            spans.push(InlineSpan::new(" ".to_string(), InlineStyle::default()));
+            match alignments.get(idx).copied().unwrap_or(TableAlignment::None) {
+                TableAlignment::Right => {
+                    spans.push(InlineSpan::new(" ".repeat(padding), InlineStyle::default()));
+                    spans.append(&mut content_spans);
+                }
+                TableAlignment::Center => {
+                    let left = padding / 2;
+                    let right = padding - left;
+                    spans.push(InlineSpan::new(" ".repeat(left), InlineStyle::default()));
+                    spans.append(&mut content_spans);
+                    spans.push(InlineSpan::new(" ".repeat(right), InlineStyle::default()));
+                }
+                TableAlignment::Left | TableAlignment::None => {
+                    spans.append(&mut content_spans);
+                    spans.push(InlineSpan::new(" ".repeat(padding), InlineStyle::default()));
+                }
+            }
+            if idx + 1 < num_cols {
+                spans.push(InlineSpan::new(" │".to_string(), InlineStyle::default()));
+            }
+        }
+        let content = spans_to_string(&spans);
+        out.push(RenderedLine::with_spans(content, LineType::Table, spans));
+    }
+    out
 }
 
 struct CollectedTableRows {
@@ -1503,7 +1662,7 @@ fn render_table_row(
 
 /// Render CSV content as table lines, reusing the existing table rendering infrastructure.
 /// All rows are rendered; the TUI viewport handles paging/scrolling.
-fn render_csv_as_table(csv_content: &str) -> Vec<RenderedLine> {
+fn render_csv_as_table(csv_content: &str, max_width: usize, wrap: bool) -> Vec<RenderedLine> {
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(false)
         .flexible(true)
@@ -1554,11 +1713,18 @@ fn render_csv_as_table(csv_content: &str) -> Vec<RenderedLine> {
 
     // All columns left-aligned (CSV has no alignment info)
     let alignments = vec![comrak::nodes::TableAlignment::None; num_cols];
+    if wrap {
+        col_widths = fit_table_col_widths(&col_widths, max_width);
+    }
     let mid = render_table_inner_divider(&col_widths);
 
     let mut lines = Vec::new();
     for (idx, row) in rows.iter().enumerate() {
-        lines.push(render_table_row(row, &col_widths, &alignments));
+        if wrap {
+            lines.extend(render_table_row_lines(row, &col_widths, &alignments));
+        } else {
+            lines.push(render_table_row(row, &col_widths, &alignments));
+        }
         // First row is treated as header
         if idx == 0 {
             lines.push(RenderedLine::new(mid.clone(), LineType::Table));
@@ -2588,6 +2754,162 @@ mod tests {
             row.spans()
                 .is_some_and(|spans| spans.iter().any(|s| s.style().link))
         }));
+    }
+
+    /// A rendered table divider row is made up entirely of `─`/`┼` rule
+    /// characters (for any column count), unlike header/data rows which
+    /// always contain at least a leading space or cell text.
+    fn is_table_divider(content: &str) -> bool {
+        !content.is_empty() && content.chars().all(|c| c == '─' || c == '┼')
+    }
+
+    #[test]
+    fn test_table_wrap_disabled_keeps_row_on_single_line() {
+        let md = "| Notes |\n|---|\n| This is a very long note that would overflow the terminal width easily |";
+        let doc = Document::parse_with_layout(md, 20).unwrap();
+        let data_lines: Vec<_> = doc
+            .visible_lines(0, 20)
+            .into_iter()
+            .filter(|l| {
+                *l.line_type() == LineType::Table
+                    && !is_table_divider(l.content())
+                    && !l.content().contains("Notes")
+            })
+            .collect();
+        assert_eq!(
+            data_lines.len(),
+            1,
+            "row should stay on a single line when table wrap is disabled"
+        );
+        assert!(data_lines[0].content().contains("This is a very long note"));
+    }
+
+    #[test]
+    fn test_table_wrap_enabled_splits_long_cell_across_lines() {
+        let md = "| Notes |\n|---|\n| This is a very long note that would overflow the terminal width easily |";
+        let opts = DiagramRenderOpts {
+            wrap_tables: true,
+            ..DiagramRenderOpts::default()
+        };
+        let doc =
+            Document::parse_with_all_options_widths(md, 20, 20, &HashMap::new(), &opts).unwrap();
+        let table_lines: Vec<_> = doc
+            .visible_lines(0, 20)
+            .into_iter()
+            .filter(|l| *l.line_type() == LineType::Table && !is_table_divider(l.content()))
+            .collect();
+        let data_lines: Vec<_> = table_lines
+            .iter()
+            .filter(|l| !l.content().contains("Notes"))
+            .collect();
+        assert!(
+            data_lines.len() > 1,
+            "long cell should wrap across multiple physical lines when table wrap is enabled"
+        );
+        for line in &table_lines {
+            assert!(
+                UnicodeWidthStr::width(line.content()) <= 20,
+                "wrapped row line should fit within max_width, got {:?}",
+                line.content()
+            );
+        }
+        let combined = data_lines
+            .iter()
+            .map(|l| l.content())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(combined.contains("This"));
+        assert!(combined.contains("overflow"));
+        assert!(combined.contains("easily"));
+    }
+
+    #[test]
+    fn test_table_wrap_enabled_short_table_unchanged() {
+        let md = "| A | B |\n|---|---|\n| 1 | 2 |";
+        let opts = DiagramRenderOpts {
+            wrap_tables: true,
+            ..DiagramRenderOpts::default()
+        };
+        let doc =
+            Document::parse_with_all_options_widths(md, 80, 80, &HashMap::new(), &opts).unwrap();
+        let table_lines: Vec<_> = doc
+            .visible_lines(0, 20)
+            .into_iter()
+            .filter(|l| *l.line_type() == LineType::Table && !is_table_divider(l.content()))
+            .collect();
+        assert_eq!(
+            table_lines.len(),
+            2,
+            "a table that already fits should render one physical line per header/data row"
+        );
+    }
+
+    #[test]
+    fn test_table_wrap_enabled_preserves_row_grid_alignment() {
+        let md = "| Description | Code |\n|---|---|\n| This description text is intentionally long to force wrapping | OK |";
+        let opts = DiagramRenderOpts {
+            wrap_tables: true,
+            ..DiagramRenderOpts::default()
+        };
+        let doc =
+            Document::parse_with_all_options_widths(md, 30, 30, &HashMap::new(), &opts).unwrap();
+        let table_lines: Vec<_> = doc
+            .visible_lines(0, 20)
+            .into_iter()
+            .filter(|l| *l.line_type() == LineType::Table && !l.content().contains('┼'))
+            .collect();
+        let data_rows: Vec<_> = table_lines
+            .iter()
+            .filter(|l| !l.content().contains("Description"))
+            .collect();
+        assert!(
+            data_rows.len() > 1,
+            "the long description cell should wrap across multiple lines"
+        );
+        for line in &data_rows {
+            assert!(
+                line.content().contains('│'),
+                "wrapped row lines should still show the column separator: {:?}",
+                line.content()
+            );
+        }
+        let combined = data_rows
+            .iter()
+            .map(|l| l.content())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(combined.contains("OK"));
+        assert!(combined.contains("wrapping"));
+    }
+
+    #[test]
+    fn test_csv_table_wrap_enabled_splits_long_cell() {
+        let md = "```csv\nName,Notes\nAlice,This is a very long note that should wrap across multiple lines when enabled\n```";
+        let opts = DiagramRenderOpts {
+            wrap_tables: true,
+            ..DiagramRenderOpts::default()
+        };
+        let doc =
+            Document::parse_with_all_options_widths(md, 24, 24, &HashMap::new(), &opts).unwrap();
+        let table_lines: Vec<_> = doc
+            .visible_lines(0, 20)
+            .into_iter()
+            .filter(|l| *l.line_type() == LineType::Table && !l.content().contains('┼'))
+            .collect();
+        for line in &table_lines {
+            assert!(
+                UnicodeWidthStr::width(line.content()) <= 24,
+                "wrapped CSV row line should fit within max_width, got {:?}",
+                line.content()
+            );
+        }
+        let combined = table_lines
+            .iter()
+            .map(|l| l.content())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(combined.contains("Alice"));
+        assert!(combined.contains("multiple"));
     }
 
     #[test]

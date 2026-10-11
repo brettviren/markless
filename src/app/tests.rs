@@ -91,6 +91,38 @@ fn test_toggle_watch_changes_state() {
 }
 
 #[test]
+fn test_toggle_table_wrap_flips_flag_and_reflows_document() {
+    let md = "| Notes |\n|---|\n| This is a very long note that would overflow a narrow terminal width |";
+    let doc = Document::parse(md).unwrap();
+    let model = Model::new(PathBuf::from("test.md"), doc, (20, 24));
+    assert!(!model.table_wrap);
+
+    let before_table_lines = model
+        .document
+        .visible_lines(0, 20)
+        .into_iter()
+        .filter(|l| *l.line_type() == crate::document::LineType::Table)
+        .count();
+
+    let model = update(model, Message::ToggleTableWrap);
+    assert!(model.table_wrap);
+
+    let after_table_lines = model
+        .document
+        .visible_lines(0, 20)
+        .into_iter()
+        .filter(|l| *l.line_type() == crate::document::LineType::Table)
+        .count();
+    assert!(
+        after_table_lines > before_table_lines,
+        "enabling table wrap should split the long cell across more physical lines"
+    );
+
+    let model = update(model, Message::ToggleTableWrap);
+    assert!(!model.table_wrap);
+}
+
+#[test]
 fn test_force_reload_reloads_document_from_disk() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("doc.md");
@@ -659,6 +691,17 @@ fn test_toc_focus_space_pages_document() {
     );
     // Space always pages the document body, even when TOC is focused
     assert_eq!(msg, Some(Message::PageDown));
+}
+
+#[test]
+fn test_shift_l_toggles_table_wrap() {
+    let model = create_test_model();
+
+    let msg = App::handle_key(
+        event::KeyEvent::new(KeyCode::Char('L'), KeyModifiers::SHIFT),
+        &model,
+    );
+    assert_eq!(msg, Some(Message::ToggleTableWrap));
 }
 
 #[test]
